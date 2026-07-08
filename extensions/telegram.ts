@@ -1,0 +1,504 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+
+const DEFAULT_TELEGRAM_API_BASE = "https://api.telegram.org";
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+const TELEGRAM_SAFE_CHUNK_LIMIT = 4000;
+const TELEGRAM_CAPTION_LIMIT = 1024;
+const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
+const TELEGRAM_AUDIO_MAX_BYTES = 50 * 1024 * 1024;
+const MAX_REQUEST_TEXT_LENGTH = 20_000;
+const ALLOWED_PARSE_MODES = new Set(["MarkdownV2", "HTML", "Markdown"]);
+
+type TelegramConfig = {
+  botToken: string;
+  chatId?: string;
+  apiBase: string;
+};
+
+type TelegramSendParams = {
+  message: string;
+  chat_id?: string;
+  parse_mode?: string;
+  disable_notification?: boolean;
+};
+
+type TelegramMediaParams = {
+  source: string;
+  caption?: string;
+  chat_id?: string;
+  parse_mode?: string;
+  disable_notification?: boolean;
+};
+
+type TelegramAudioParams = TelegramMediaParams & {
+  duration?: number;
+  performer?: string;
+  title?: string;
+};
+
+type TelegramApiResponse = {
+  ok: boolean;
+  description?: string;
+  error_code?: number;
+  result?: {
+    message_id?: number;
+    chat?: { id?: number | string; username?: string; title?: string; first_name?: string };
+  };
+};
+
+function parseDotEnv(content: string): Record<string, string> {
+  const values: Record<string, string> = {};
+
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) continue;
+
+    const [, key, rawValue = ""] = match;
+    let value = rawValue.trim();
+
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    } else {
+      const commentStart = value.search(/\s#/);
+      if (commentStart >= 0) value = value.slice(0, commentStart).trimEnd();
+    }
+
+    values[key] = value.replace(/\\n/g, "\n");
+  }
+
+  return values;
+}
+
+function loadDotEnv(cwd?: string): Record<string, string> {
+  if (!cwd) return {};
+
+  const path = join(cwd, ".env");
+  if (!existsSync(path)) return {};
+
+  return parseDotEnv(readFileSync(path, "utf8"));
+}
+
+function firstConfigValue(dotEnv: Record<string, string>, ...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = (process.env[name] ?? dotEnv[name])?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function resolveConfig(cwd?: string): TelegramConfig {
+  const dotEnv = loadDotEnv(cwd);
+
+  return {
+    botToken: firstConfigValue(dotEnv, "PI_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN") ?? "",
+    chatId: firstConfigValue(dotEnv, "PI_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"),
+    apiBase: (firstConfigValue(dotEnv, "PI_TELEGRAM_API_BASE", "TELEGRAM_API_BASE") ?? DEFAULT_TELEGRAM_API_BASE).replace(/\/+$/, ""),
+  };
+}
+
+export function splitTelegramMessage(text: string, limit = TELEGRAM_MESSAGE_LIMIT): string[] {
+  if (limit < 1) throw new Error("Telegram message split limit must be positive.");
+
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) throw new Error("Telegram message text must not be empty.");
+
+  const chunks: string[] = [];
+  let remaining = normalized;
+
+  while (remaining.length > limit) {
+    const window = remaining.slice(0, limit + 1);
+    const candidates = [window.lastIndexOf("\n\n"), window.lastIndexOf("\n"), window.lastIndexOf(" ")];
+    const breakAt = candidates.find((index) => index >= Math.floor(limit * 0.6)) ?? limit;
+
+    const chunk = remaining.slice(0, breakAt).trimEnd();
+    chunks.push(chunk || remaining.slice(0, limit));
+    remaining = remaining.slice(chunk ? breakAt : limit).trimStart();
+  }
+
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+function validateChatAndParseMode(
+  params: { chat_id?: string; parse_mode?: string },
+  config: TelegramConfig,
+): { chatId: string; parseMode?: string } {
+  if (!config.botToken) {
+    throw new Error(
+      "Telegram is not configured: set PI_TELEGRAM_BOT_TOKEN (or TELEGRAM_BOT_TOKEN) to your BotFather token.",
+    );
+  }
+
+  const chatId = params.chat_id?.trim() || config.chatId;
+  if (!chatId) {
+    throw new Error(
+      "Telegram chat is not configured: set PI_TELEGRAM_CHAT_ID (or TELEGRAM_CHAT_ID), or pass chat_id to the Telegram tool.",
+    );
+  }
+
+  const parseMode = params.parse_mode?.trim();
+  if (parseMode && !ALLOWED_PARSE_MODES.has(parseMode)) {
+    throw new Error(`Unsupported Telegram parse_mode '${parseMode}'. Use HTML, MarkdownV2, Markdown, or omit parse_mode for plain text.`);
+  }
+
+  return { chatId, parseMode };
+}
+
+function validateTextParams(params: TelegramSendParams, config: TelegramConfig): { chatId: string; parseMode?: string } {
+  if (params.message.length > MAX_REQUEST_TEXT_LENGTH) {
+    throw new Error(`Telegram message is too long (${params.message.length} chars). Keep it under ${MAX_REQUEST_TEXT_LENGTH} chars.`);
+  }
+
+  return validateChatAndParseMode(params, config);
+}
+
+function validateCaption(caption: string | undefined): string | undefined {
+  const trimmed = caption?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length > TELEGRAM_CAPTION_LIMIT) {
+    throw new Error(`Telegram media caption is too long (${trimmed.length} chars). Keep it under ${TELEGRAM_CAPTION_LIMIT} chars.`);
+  }
+  return trimmed;
+}
+
+function normalizeSource(source: string): string {
+  const trimmed = source.trim();
+  return trimmed.startsWith("@") ? trimmed.slice(1) : trimmed;
+}
+
+function isHttpUrl(source: string): boolean {
+  return /^https?:\/\//i.test(source);
+}
+
+function resolveLocalSource(source: string, cwd: string): string | undefined {
+  if (isHttpUrl(source)) return undefined;
+
+  const resolved = resolve(cwd, source);
+  if (!existsSync(resolved)) return undefined;
+
+  const stats = statSync(resolved);
+  if (!stats.isFile()) throw new Error(`Telegram media source is not a file: ${source}`);
+  return resolved;
+}
+
+function mimeTypeForPath(path: string, kind: "photo" | "audio"): string {
+  const lower = path.toLowerCase();
+
+  if (kind === "photo") {
+    if (lower.endsWith(".png")) return "image/png";
+    if (lower.endsWith(".webp")) return "image/webp";
+    if (lower.endsWith(".gif")) return "image/gif";
+    return "image/jpeg";
+  }
+
+  if (lower.endsWith(".m4a")) return "audio/mp4";
+  if (lower.endsWith(".aac")) return "audio/aac";
+  if (lower.endsWith(".wav")) return "audio/wav";
+  if (lower.endsWith(".ogg")) return "audio/ogg";
+  return "audio/mpeg";
+}
+
+function buildJsonBody(fields: Record<string, string | number | boolean | undefined>): string {
+  const body: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) body[key] = value;
+  }
+  return JSON.stringify(body);
+}
+
+function buildMultipartBody(
+  fields: Record<string, string | number | boolean | undefined>,
+  media: { fieldName: string; filePath: string; kind: "photo" | "audio" },
+): FormData {
+  const form = new FormData();
+
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) form.append(key, String(value));
+  }
+
+  const fileBytes = readFileSync(media.filePath);
+  const blob = new Blob([fileBytes], { type: mimeTypeForPath(media.filePath, media.kind) });
+  form.append(media.fieldName, blob, basename(media.filePath));
+
+  return form;
+}
+
+async function callTelegramApi(
+  config: TelegramConfig,
+  method: string,
+  body: string | FormData,
+  signal?: AbortSignal,
+): Promise<TelegramApiResponse> {
+  const headers = typeof body === "string" ? { "content-type": "application/json" } : undefined;
+  const response = await fetch(`${config.apiBase}/bot${config.botToken}/${method}`, {
+    method: "POST",
+    headers,
+    body,
+    signal,
+  });
+
+  const responseBody = await response.text();
+  let payload: TelegramApiResponse;
+  try {
+    payload = JSON.parse(responseBody) as TelegramApiResponse;
+  } catch {
+    throw new Error(`Telegram API returned non-JSON response with HTTP ${response.status}: ${responseBody.slice(0, 300)}`);
+  }
+
+  if (!response.ok || !payload.ok) {
+    const reason = payload.description || `HTTP ${response.status}`;
+    throw new Error(`Telegram API ${method} failed${payload.error_code ? ` (${payload.error_code})` : ""}: ${reason}`);
+  }
+
+  return payload;
+}
+
+async function sendTelegramChunk(
+  config: TelegramConfig,
+  chunk: string,
+  options: { chatId: string; parseMode?: string; disableNotification?: boolean; signal?: AbortSignal },
+): Promise<TelegramApiResponse> {
+  return callTelegramApi(
+    config,
+    "sendMessage",
+    buildJsonBody({
+      chat_id: options.chatId,
+      text: chunk,
+      parse_mode: options.parseMode,
+      disable_notification: options.disableNotification,
+    }),
+    options.signal,
+  );
+}
+
+async function sendTelegramMedia(
+  config: TelegramConfig,
+  method: "sendPhoto" | "sendAudio",
+  params: TelegramMediaParams | TelegramAudioParams,
+  options: { cwd: string; mediaField: "photo" | "audio"; maxBytes: number; signal?: AbortSignal },
+): Promise<TelegramApiResponse> {
+  const { chatId, parseMode } = validateChatAndParseMode(params, config);
+  const source = normalizeSource(params.source);
+  const caption = validateCaption(params.caption);
+  const localPath = resolveLocalSource(source, options.cwd);
+
+  const fields: Record<string, string | number | boolean | undefined> = {
+    chat_id: chatId,
+    caption,
+    parse_mode: parseMode,
+    disable_notification: params.disable_notification,
+  };
+
+  if (method === "sendAudio") {
+    const audioParams = params as TelegramAudioParams;
+    fields.duration = audioParams.duration;
+    fields.performer = audioParams.performer;
+    fields.title = audioParams.title;
+  }
+
+  if (localPath) {
+    const stats = statSync(localPath);
+    if (stats.size > options.maxBytes) {
+      throw new Error(`Telegram ${options.mediaField} file is too large (${stats.size} bytes). Limit is ${options.maxBytes} bytes.`);
+    }
+
+    return callTelegramApi(
+      config,
+      method,
+      buildMultipartBody(fields, { fieldName: options.mediaField, filePath: localPath, kind: options.mediaField }),
+      options.signal,
+    );
+  }
+
+  return callTelegramApi(
+    config,
+    method,
+    buildJsonBody({ ...fields, [options.mediaField]: source }),
+    options.signal,
+  );
+}
+
+const telegramSendMessageTool = defineTool({
+  name: "telegram_send_message",
+  label: "Telegram Notify",
+  description:
+    "Send a one-way text notification or report from Pi to the user's configured Telegram chat via a BotFather bot. Does not read Telegram replies.",
+  promptSnippet: "Send a one-way Telegram notification/report to the configured user chat.",
+  promptGuidelines: [
+    "Use telegram_send_message when the user asks Pi to notify them, send a report, or send status updates via Telegram.",
+    "Do not use telegram_send_message for clarification questions or two-way conversation; Telegram support is one-way from agent to user.",
+    "Keep telegram_send_message content concise and never include secrets, API keys, bot tokens, or private credentials.",
+  ],
+  parameters: Type.Object({
+    message: Type.String({
+      description: "Plain text message/report to send. Long text is split into Telegram-sized chunks automatically.",
+      minLength: 1,
+      maxLength: MAX_REQUEST_TEXT_LENGTH,
+    }),
+    chat_id: Type.Optional(
+      Type.String({
+        description:
+          "Optional Telegram chat id or @channelusername. Defaults to PI_TELEGRAM_CHAT_ID/TELEGRAM_CHAT_ID when omitted.",
+      }),
+    ),
+    parse_mode: Type.Optional(
+      Type.String({
+        description: "Optional Telegram parse mode: HTML, MarkdownV2, or Markdown. Omit for safest plain text delivery.",
+      }),
+    ),
+    disable_notification: Type.Optional(
+      Type.Boolean({ description: "If true, Telegram sends the message silently without notification sound." }),
+    ),
+  }),
+
+  async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    const config = resolveConfig(ctx.cwd);
+    const { chatId, parseMode } = validateTextParams(params, config);
+    const chunks = splitTelegramMessage(params.message, TELEGRAM_SAFE_CHUNK_LIMIT);
+    const messageIds: Array<number | undefined> = [];
+
+    for (const [index, chunk] of chunks.entries()) {
+      const text = chunks.length === 1 ? chunk : `(${index + 1}/${chunks.length})\n${chunk}`;
+      const payload = await sendTelegramChunk(config, text, {
+        chatId,
+        parseMode,
+        disableNotification: params.disable_notification,
+        signal,
+      });
+      messageIds.push(payload.result?.message_id);
+    }
+
+    const summary = `Sent ${chunks.length} Telegram message${chunks.length === 1 ? "" : "s"} to ${chatId}.`;
+    return {
+      content: [{ type: "text", text: summary }],
+      details: {
+        chatId,
+        chunksSent: chunks.length,
+        messageIds,
+        parseMode: parseMode ?? "plain",
+        disableNotification: Boolean(params.disable_notification),
+      },
+    };
+  },
+});
+
+const telegramSendImageTool = defineTool({
+  name: "telegram_send_image",
+  label: "Telegram Image",
+  description:
+    "Send a one-way image/photo file to the user's configured Telegram chat. Accepts a local file path, HTTP(S) URL, or Telegram file_id. Does not read Telegram replies.",
+  promptSnippet: "Send an image/photo file to the configured Telegram chat.",
+  promptGuidelines: [
+    "Use telegram_send_image when the user asks Pi to send an image, screenshot, diagram, visual report, or generated image via Telegram.",
+    "Before using telegram_send_image with a local file, make sure the file exists and is the intended image; do not send unrelated private images.",
+    "Do not use telegram_send_image for two-way conversation; Telegram support is one-way from agent to user.",
+  ],
+  parameters: Type.Object({
+    source: Type.String({
+      description: "Local image path relative to Pi's current working directory, absolute image path, HTTP(S) URL, or Telegram file_id.",
+      minLength: 1,
+    }),
+    caption: Type.Optional(Type.String({ description: "Optional image caption, max 1024 characters.", maxLength: TELEGRAM_CAPTION_LIMIT })),
+    chat_id: Type.Optional(Type.String({ description: "Optional Telegram chat id or @channelusername. Defaults to configured chat id." })),
+    parse_mode: Type.Optional(Type.String({ description: "Optional caption parse mode: HTML, MarkdownV2, or Markdown. Omit for plain text." })),
+    disable_notification: Type.Optional(Type.Boolean({ description: "If true, Telegram sends the image silently." })),
+  }),
+
+  async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    const config = resolveConfig(ctx.cwd);
+    const payload = await sendTelegramMedia(config, "sendPhoto", params, {
+      cwd: ctx.cwd,
+      mediaField: "photo",
+      maxBytes: TELEGRAM_PHOTO_MAX_BYTES,
+      signal,
+    });
+
+    return {
+      content: [{ type: "text", text: `Sent Telegram image to ${payload.result?.chat?.id ?? params.chat_id ?? "configured chat"}.` }],
+      details: {
+        chatId: payload.result?.chat?.id ?? params.chat_id,
+        messageId: payload.result?.message_id,
+        source: params.source,
+        caption: params.caption,
+      },
+    };
+  },
+});
+
+const telegramSendAudioTool = defineTool({
+  name: "telegram_send_audio",
+  label: "Telegram Audio",
+  description:
+    "Send a one-way audio file to the user's configured Telegram chat. Accepts a local file path, HTTP(S) URL, or Telegram file_id. Does not read Telegram replies.",
+  promptSnippet: "Send an audio file to the configured Telegram chat.",
+  promptGuidelines: [
+    "Use telegram_send_audio when the user asks Pi to send an audio file, music file, recording, or generated audio via Telegram.",
+    "Before using telegram_send_audio with a local file, make sure the file exists and is the intended audio; do not send unrelated private recordings.",
+    "Do not use telegram_send_audio for two-way conversation; Telegram support is one-way from agent to user.",
+  ],
+  parameters: Type.Object({
+    source: Type.String({
+      description: "Local audio path relative to Pi's current working directory, absolute audio path, HTTP(S) URL, or Telegram file_id.",
+      minLength: 1,
+    }),
+    caption: Type.Optional(Type.String({ description: "Optional audio caption, max 1024 characters.", maxLength: TELEGRAM_CAPTION_LIMIT })),
+    title: Type.Optional(Type.String({ description: "Optional track title shown by Telegram clients." })),
+    performer: Type.Optional(Type.String({ description: "Optional performer/artist shown by Telegram clients." })),
+    duration: Type.Optional(Type.Number({ description: "Optional audio duration in seconds." })),
+    chat_id: Type.Optional(Type.String({ description: "Optional Telegram chat id or @channelusername. Defaults to configured chat id." })),
+    parse_mode: Type.Optional(Type.String({ description: "Optional caption parse mode: HTML, MarkdownV2, or Markdown. Omit for plain text." })),
+    disable_notification: Type.Optional(Type.Boolean({ description: "If true, Telegram sends the audio silently." })),
+  }),
+
+  async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    const config = resolveConfig(ctx.cwd);
+    const payload = await sendTelegramMedia(config, "sendAudio", params, {
+      cwd: ctx.cwd,
+      mediaField: "audio",
+      maxBytes: TELEGRAM_AUDIO_MAX_BYTES,
+      signal,
+    });
+
+    return {
+      content: [{ type: "text", text: `Sent Telegram audio to ${payload.result?.chat?.id ?? params.chat_id ?? "configured chat"}.` }],
+      details: {
+        chatId: payload.result?.chat?.id ?? params.chat_id,
+        messageId: payload.result?.message_id,
+        source: params.source,
+        caption: params.caption,
+        title: params.title,
+        performer: params.performer,
+        duration: params.duration,
+      },
+    };
+  },
+});
+
+export default function piTelegramExtension(pi: ExtensionAPI) {
+  pi.registerTool(telegramSendMessageTool);
+  pi.registerTool(telegramSendImageTool);
+  pi.registerTool(telegramSendAudioTool);
+
+  pi.registerCommand("telegram-test", {
+    description: "Send a test message to the configured Telegram chat.",
+    handler: async (args, ctx) => {
+      const config = resolveConfig(ctx.cwd);
+      const message = args.trim() || `Pi Telegram test from ${ctx.cwd}`;
+      const { chatId } = validateTextParams({ message }, config);
+      const chunks = splitTelegramMessage(message, TELEGRAM_SAFE_CHUNK_LIMIT);
+
+      for (const [index, chunk] of chunks.entries()) {
+        const text = chunks.length === 1 ? chunk : `(${index + 1}/${chunks.length})\n${chunk}`;
+        await sendTelegramChunk(config, text, { chatId });
+      }
+
+      ctx.ui.notify(`Sent Telegram test message to ${chatId}.`, "info");
+    },
+  });
+}
