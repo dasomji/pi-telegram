@@ -8,38 +8,44 @@ This package gives Pi Telegram tools and a `telegram-notify` skill so you can sa
 
 The integration is intentionally **agent → Telegram only**. It does not listen for Telegram replies, run a webhook, or turn Telegram into a second Pi chat thread.
 
+## Install
+
+Install from npm:
+
+```bash
+pi install npm:@wienerberliner/pi-telegram
+```
+
+Or try the local checkout while developing:
+
+```bash
+pi install /path/to/pi-telegram
+```
+
+For local development in this repository, `.pi/settings.json` loads the package root (`..`) after the project is trusted. Run `/trust` and `/reload` if Pi is already open.
+
 ## Setup
 
 1. In Telegram, open [@BotFather](https://t.me/BotFather) and create a bot with `/newbot`.
-2. Copy the bot token and export it locally:
+2. Copy the bot token.
+3. In Pi, run:
 
-   ```bash
-   export PI_TELEGRAM_BOT_TOKEN="123456:your-bot-token"
+   ```text
+   /setup-telegram-token
    ```
 
-3. Start a chat with your new bot from the Telegram account that should receive Pi notifications, and send the bot any message.
-4. Find your chat id. A simple setup-only way is:
+4. Paste the BotFather token into the secure Pi input prompt. This keeps the token out of the LLM chat transcript.
+5. The command validates the token, saves it to `.env`, and asks you to send a message such as `hello world` to the bot.
+6. After you send the Telegram message, press Enter in Pi. The command fetches the chat id with Telegram `getUpdates`, saves it to `.env`, and sends a confirmation message to Telegram.
 
-   ```bash
-   curl "https://api.telegram.org/bot$PI_TELEGRAM_BOT_TOKEN/getUpdates"
-   ```
+The generated `.env` uses:
 
-   Look for `message.chat.id` in the JSON response.
+```env
+PI_TELEGRAM_BOT_TOKEN=123456:your-bot-token
+PI_TELEGRAM_CHAT_ID=123456789
+```
 
-5. Store the values in `.env` in the directory where you start Pi, or export them before starting Pi:
-
-   ```bash
-   cp .env.example .env
-   # edit .env with your real token/chat id
-   pi
-   ```
-
-   ```bash
-   export PI_TELEGRAM_CHAT_ID="123456789"
-   pi
-   ```
-
-   The extension automatically reads `.env` from Pi's current working directory. The unprefixed names `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` also work.
+The extension automatically reads `.env` from Pi's current working directory. Real environment variables also work, and the unprefixed names `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are supported.
 
 ## Usage
 
@@ -49,10 +55,12 @@ Ask Pi naturally:
 Run the test suite. When you're done, send me a report via Telegram.
 ```
 
-You can also test the extension command from Pi:
+```text
+Send screenshots/final.png to me via Telegram with caption "Final screenshot".
+```
 
 ```text
-/telegram-test Hello from Pi
+Send output/demo.m4a to Telegram as the demo audio.
 ```
 
 ## Tools
@@ -105,12 +113,6 @@ Local audio files are uploaded with `multipart/form-data`. Telegram documents `s
 
 Configuration can come from real environment variables or from a gitignored `.env` file in Pi's current working directory.
 
-## Install as a Pi package
+## npm
 
-From a local checkout:
-
-```bash
-pi install /path/to/pi-telegram
-```
-
-For local development in this repository, `.pi/settings.json` loads the package root (`..`) after the project is trusted. Run `/trust` and `/reload` if Pi is already open.
+Package page: <https://www.npmjs.com/package/@wienerberliner/pi-telegram>

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -39,14 +39,41 @@ type TelegramAudioParams = TelegramMediaParams & {
   title?: string;
 };
 
-type TelegramApiResponse = {
+type TelegramChat = {
+  id: number | string;
+  type?: string;
+  username?: string;
+  title?: string;
+  first_name?: string;
+  last_name?: string;
+};
+
+type TelegramMessageResult = {
+  message_id?: number;
+  chat?: TelegramChat;
+};
+
+type TelegramUser = {
+  id: number;
+  is_bot: boolean;
+  first_name: string;
+  username?: string;
+};
+
+type TelegramUpdate = {
+  update_id: number;
+  message?: { chat?: TelegramChat };
+  edited_message?: { chat?: TelegramChat };
+  channel_post?: { chat?: TelegramChat };
+  edited_channel_post?: { chat?: TelegramChat };
+  my_chat_member?: { chat?: TelegramChat };
+};
+
+type TelegramApiResponse<TResult = TelegramMessageResult> = {
   ok: boolean;
   description?: string;
   error_code?: number;
-  result?: {
-    message_id?: number;
-    chat?: { id?: number | string; username?: string; title?: string; first_name?: string };
-  };
+  result?: TResult;
 };
 
 function parseDotEnv(content: string): Record<string, string> {
@@ -75,13 +102,46 @@ function parseDotEnv(content: string): Record<string, string> {
   return values;
 }
 
+function dotEnvPath(cwd: string): string {
+  return join(cwd, ".env");
+}
+
 function loadDotEnv(cwd?: string): Record<string, string> {
   if (!cwd) return {};
 
-  const path = join(cwd, ".env");
+  const path = dotEnvPath(cwd);
   if (!existsSync(path)) return {};
 
   return parseDotEnv(readFileSync(path, "utf8"));
+}
+
+function formatDotEnvValue(value: string): string {
+  if (/^[A-Za-z0-9_:@./+=-]*$/.test(value)) return value;
+  return JSON.stringify(value);
+}
+
+function writeDotEnvValues(cwd: string, updates: Record<string, string>): void {
+  const path = dotEnvPath(cwd);
+  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const lines = existing ? existing.split(/\r?\n/) : [];
+  const pending = new Map(Object.entries(updates));
+  const next = lines.map((line) => {
+    const match = line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/);
+    if (!match) return line;
+
+    const [, prefix, key, separator] = match;
+    if (!pending.has(key)) return line;
+
+    const value = pending.get(key) ?? "";
+    pending.delete(key);
+    return `${prefix}${key}${separator}${formatDotEnvValue(value)}`;
+  });
+
+  for (const [key, value] of pending) {
+    next.push(`${key}=${formatDotEnvValue(value)}`);
+  }
+
+  writeFileSync(path, `${next.join("\n").replace(/\n*$/, "")}\n`, { mode: 0o600 });
 }
 
 function firstConfigValue(dotEnv: Record<string, string>, ...names: string[]): string | undefined {
@@ -229,12 +289,12 @@ function buildMultipartBody(
   return form;
 }
 
-async function callTelegramApi(
+async function callTelegramApi<TResult = TelegramMessageResult>(
   config: TelegramConfig,
   method: string,
   body: string | FormData,
   signal?: AbortSignal,
-): Promise<TelegramApiResponse> {
+): Promise<TelegramApiResponse<TResult>> {
   const headers = typeof body === "string" ? { "content-type": "application/json" } : undefined;
   const response = await fetch(`${config.apiBase}/bot${config.botToken}/${method}`, {
     method: "POST",
@@ -244,9 +304,9 @@ async function callTelegramApi(
   });
 
   const responseBody = await response.text();
-  let payload: TelegramApiResponse;
+  let payload: TelegramApiResponse<TResult>;
   try {
-    payload = JSON.parse(responseBody) as TelegramApiResponse;
+    payload = JSON.parse(responseBody) as TelegramApiResponse<TResult>;
   } catch {
     throw new Error(`Telegram API returned non-JSON response with HTTP ${response.status}: ${responseBody.slice(0, 300)}`);
   }
@@ -275,6 +335,43 @@ async function sendTelegramChunk(
     }),
     options.signal,
   );
+}
+
+async function getTelegramBot(config: TelegramConfig): Promise<TelegramUser> {
+  if (!config.botToken) {
+    throw new Error("Telegram bot token is missing.");
+  }
+
+  const payload = await callTelegramApi<TelegramUser>(config, "getMe", buildJsonBody({}));
+  if (!payload.result) throw new Error("Telegram getMe returned no bot information.");
+  return payload.result;
+}
+
+async function getTelegramUpdates(config: TelegramConfig): Promise<TelegramUpdate[]> {
+  const payload = await callTelegramApi<TelegramUpdate[]>(config, "getUpdates", buildJsonBody({ timeout: 10 }));
+  return payload.result ?? [];
+}
+
+function chatFromUpdate(update: TelegramUpdate): TelegramChat | undefined {
+  return (
+    update.message?.chat ??
+    update.edited_message?.chat ??
+    update.channel_post?.chat ??
+    update.edited_channel_post?.chat ??
+    update.my_chat_member?.chat
+  );
+}
+
+function latestChatFromUpdates(updates: TelegramUpdate[]): TelegramChat | undefined {
+  for (const update of [...updates].sort((a, b) => b.update_id - a.update_id)) {
+    const chat = chatFromUpdate(update);
+    if (chat?.id !== undefined) return chat;
+  }
+  return undefined;
+}
+
+function displayBotTarget(bot: TelegramUser): string {
+  return bot.username ? `@${bot.username}` : bot.first_name;
 }
 
 async function sendTelegramMedia(
@@ -485,20 +582,66 @@ export default function piTelegramExtension(pi: ExtensionAPI) {
   pi.registerTool(telegramSendImageTool);
   pi.registerTool(telegramSendAudioTool);
 
-  pi.registerCommand("telegram-test", {
-    description: "Send a test message to the configured Telegram chat.",
-    handler: async (args, ctx) => {
-      const config = resolveConfig(ctx.cwd);
-      const message = args.trim() || `Pi Telegram test from ${ctx.cwd}`;
-      const { chatId } = validateTextParams({ message }, config);
-      const chunks = splitTelegramMessage(message, TELEGRAM_SAFE_CHUNK_LIMIT);
-
-      for (const [index, chunk] of chunks.entries()) {
-        const text = chunks.length === 1 ? chunk : `(${index + 1}/${chunks.length})\n${chunk}`;
-        await sendTelegramChunk(config, text, { chatId });
+  pi.registerCommand("setup-telegram-token", {
+    description: "Configure Telegram BotFather token and chat id in a local .env file without sending the token to the LLM.",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) {
+        throw new Error("/setup-telegram-token requires interactive UI so the token is not sent through the LLM chat.");
       }
 
-      ctx.ui.notify(`Sent Telegram test message to ${chatId}.`, "info");
+      const existingConfig = resolveConfig(ctx.cwd);
+      const tokenPrompt = existingConfig.botToken
+        ? "Telegram bot token (leave blank to keep the existing .env token):"
+        : "Telegram bot token from BotFather:";
+      const enteredToken = await ctx.ui.input(tokenPrompt, existingConfig.botToken ? "leave blank to keep existing" : "123456:ABC...");
+      if (enteredToken === undefined) {
+        ctx.ui.notify("Telegram setup cancelled.", "warning");
+        return;
+      }
+
+      const enteredTokenTrimmed = enteredToken.trim();
+      const botToken = enteredTokenTrimmed || existingConfig.botToken;
+      const tokenChanged = Boolean(enteredTokenTrimmed) && enteredTokenTrimmed !== existingConfig.botToken;
+      if (!botToken) {
+        ctx.ui.notify("Telegram setup cancelled: no bot token provided.", "warning");
+        return;
+      }
+
+      const configWithToken: TelegramConfig = {
+        ...existingConfig,
+        botToken,
+      };
+      const bot = await getTelegramBot(configWithToken);
+      const botTarget = displayBotTarget(bot);
+
+      writeDotEnvValues(
+        ctx.cwd,
+        tokenChanged ? { PI_TELEGRAM_BOT_TOKEN: botToken, PI_TELEGRAM_CHAT_ID: "" } : { PI_TELEGRAM_BOT_TOKEN: botToken },
+      );
+      ctx.ui.notify(`Saved Telegram bot token for ${botTarget} to .env.`, "info");
+
+      const confirmation = await ctx.ui.input(
+        `Send any message (for example "hello world") to ${botTarget}, then press Enter here:`,
+        "press Enter after messaging the bot",
+      );
+      if (confirmation === undefined) {
+        ctx.ui.notify("Telegram token saved; chat id discovery skipped.", "warning");
+        return;
+      }
+
+      const updates = await getTelegramUpdates(configWithToken);
+      const chat = latestChatFromUpdates(updates);
+      if (!chat) {
+        ctx.ui.notify(`No Telegram chat id found yet. Send a message to ${botTarget}, then run /setup-telegram-token again.`, "error");
+        return;
+      }
+
+      const chatId = String(chat.id);
+      const finalConfig: TelegramConfig = { ...configWithToken, chatId };
+      writeDotEnvValues(ctx.cwd, { PI_TELEGRAM_BOT_TOKEN: botToken, PI_TELEGRAM_CHAT_ID: chatId });
+
+      await sendTelegramChunk(finalConfig, "Pi Telegram setup complete. One-way notifications are working.", { chatId });
+      ctx.ui.notify(`Saved Telegram chat id ${chatId} to .env and sent a setup confirmation.`, "info");
     },
   });
 }
