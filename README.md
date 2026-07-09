@@ -73,6 +73,29 @@ Send output/demo.m4a to Telegram as the demo audio.
 Build the Android debug APK and send it to me via Telegram.
 ```
 
+## CLI
+
+The package also installs a `pi-telegram` command for shell scripts, other agents, or contexts where loading Pi tools is not desirable.
+
+```bash
+pi-telegram send-message --message "Build finished" --silent
+pi-telegram send-message --message-file ./report.txt --json
+pi-telegram send-file --source ./app-release.apk --caption "Release APK" --json
+pi-telegram send-image --source ./screenshot.png --caption "Final screenshot"
+pi-telegram send-audio --source ./demo.m4a --title "Demo audio"
+pi-telegram setup --bot-token-file ~/.secrets/pi-telegram-token --chat-id 123456789
+printf '%s' "$BOT_TOKEN" | pi-telegram setup --bot-token-stdin --chat-id 123456789
+pi-telegram config-path
+```
+
+CLI commands read the same configuration as the Pi extension:
+
+1. Real environment variables.
+2. Project-local `.env` in the current working directory.
+3. Global `~/.pi/agent/pi-telegram/.env`.
+
+Run `pi-telegram --help` for the full command list and options. The CLI also supports `--dry-run` for validation without sending.
+
 ## Tools
 
 ### `telegram_send_message`

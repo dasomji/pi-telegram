@@ -132,10 +132,14 @@ function loadProjectDotEnv(cwd?: string): Record<string, string> {
   return loadDotEnvFile(projectDotEnvPath(cwd));
 }
 
+function withoutBlankValues(values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value.trim().length > 0));
+}
+
 function loadConfigDotEnv(cwd?: string): Record<string, string> {
   return {
-    ...loadDotEnvFile(globalDotEnvPath()),
-    ...loadProjectDotEnv(cwd),
+    ...withoutBlankValues(loadDotEnvFile(globalDotEnvPath())),
+    ...withoutBlankValues(loadProjectDotEnv(cwd)),
   };
 }
 
