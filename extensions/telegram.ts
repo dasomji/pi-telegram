@@ -1,9 +1,11 @@
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const DEFAULT_TELEGRAM_API_BASE = "https://api.telegram.org";
+const GLOBAL_CONFIG_DIR_ENV = "PI_TELEGRAM_CONFIG_DIR";
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 const TELEGRAM_SAFE_CHUNK_LIMIT = 4000;
 const TELEGRAM_CAPTION_LIMIT = 1024;
@@ -108,17 +110,33 @@ function parseDotEnv(content: string): Record<string, string> {
   return values;
 }
 
-function dotEnvPath(cwd: string): string {
+function projectDotEnvPath(cwd: string): string {
   return join(cwd, ".env");
 }
 
-function loadDotEnv(cwd?: string): Record<string, string> {
-  if (!cwd) return {};
+function globalConfigDir(): string {
+  return process.env[GLOBAL_CONFIG_DIR_ENV]?.trim() || join(homedir(), ".pi", "agent", "pi-telegram");
+}
 
-  const path = dotEnvPath(cwd);
+function globalDotEnvPath(): string {
+  return join(globalConfigDir(), ".env");
+}
+
+function loadDotEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
-
   return parseDotEnv(readFileSync(path, "utf8"));
+}
+
+function loadProjectDotEnv(cwd?: string): Record<string, string> {
+  if (!cwd) return {};
+  return loadDotEnvFile(projectDotEnvPath(cwd));
+}
+
+function loadConfigDotEnv(cwd?: string): Record<string, string> {
+  return {
+    ...loadDotEnvFile(globalDotEnvPath()),
+    ...loadProjectDotEnv(cwd),
+  };
 }
 
 function formatDotEnvValue(value: string): string {
@@ -126,8 +144,8 @@ function formatDotEnvValue(value: string): string {
   return JSON.stringify(value);
 }
 
-function writeDotEnvValues(cwd: string, updates: Record<string, string>): void {
-  const path = dotEnvPath(cwd);
+function writeDotEnvValues(path: string, updates: Record<string, string>): void {
+  mkdirSync(dirname(path), { recursive: true });
   const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
   const lines = existing ? existing.split(/\r?\n/) : [];
   const pending = new Map(Object.entries(updates));
@@ -159,7 +177,7 @@ function firstConfigValue(dotEnv: Record<string, string>, ...names: string[]): s
 }
 
 function resolveConfig(cwd?: string): TelegramConfig {
-  const dotEnv = loadDotEnv(cwd);
+  const dotEnv = loadConfigDotEnv(cwd);
 
   return {
     botToken: firstConfigValue(dotEnv, "PI_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN") ?? "",
@@ -661,7 +679,7 @@ export default function piTelegramExtension(pi: ExtensionAPI) {
   pi.registerTool(telegramSendAudioTool);
 
   pi.registerCommand("setup-telegram-token", {
-    description: "Configure Telegram BotFather token and chat id in a local .env file without sending the token to the LLM.",
+    description: "Configure Telegram BotFather token and chat id in a global Pi Telegram .env file without sending the token to the LLM.",
     handler: async (_args, ctx) => {
       if (!ctx.hasUI) {
         throw new Error("/setup-telegram-token requires interactive UI so the token is not sent through the LLM chat.");
@@ -692,11 +710,12 @@ export default function piTelegramExtension(pi: ExtensionAPI) {
       const bot = await getTelegramBot(configWithToken);
       const botTarget = displayBotTarget(bot);
 
+      const configPath = globalDotEnvPath();
       writeDotEnvValues(
-        ctx.cwd,
+        configPath,
         tokenChanged ? { PI_TELEGRAM_BOT_TOKEN: botToken, PI_TELEGRAM_CHAT_ID: "" } : { PI_TELEGRAM_BOT_TOKEN: botToken },
       );
-      ctx.ui.notify(`Saved Telegram bot token for ${botTarget} to .env.`, "info");
+      ctx.ui.notify(`Saved Telegram bot token for ${botTarget} to ${configPath}.`, "info");
 
       const confirmation = await ctx.ui.input(
         `Send any message (for example "hello world") to ${botTarget}, then press Enter here:`,
@@ -716,10 +735,10 @@ export default function piTelegramExtension(pi: ExtensionAPI) {
 
       const chatId = String(chat.id);
       const finalConfig: TelegramConfig = { ...configWithToken, chatId };
-      writeDotEnvValues(ctx.cwd, { PI_TELEGRAM_BOT_TOKEN: botToken, PI_TELEGRAM_CHAT_ID: chatId });
+      writeDotEnvValues(configPath, { PI_TELEGRAM_BOT_TOKEN: botToken, PI_TELEGRAM_CHAT_ID: chatId });
 
       await sendTelegramChunk(finalConfig, "Pi Telegram setup complete. One-way notifications are working.", { chatId });
-      ctx.ui.notify(`Saved Telegram chat id ${chatId} to .env and sent a setup confirmation.`, "info");
+      ctx.ui.notify(`Saved Telegram chat id ${chatId} to ${configPath} and sent a setup confirmation.`, "info");
     },
   });
 }

@@ -38,4 +38,4 @@ If the user says, "when you're done with the job send me a report via telegram":
 3. If the user requested a generated image/audio/file artifact, call `telegram_send_image`, `telegram_send_audio`, or `telegram_send_file` with the artifact path and a short caption.
 4. In the final chat response, mention what was sent via Telegram.
 
-If `telegram_send_message` reports missing configuration, tell the user to configure `PI_TELEGRAM_BOT_TOKEN` and `PI_TELEGRAM_CHAT_ID` (or the unprefixed `TELEGRAM_*` variants) and to start a chat with the bot first.
+If a Telegram tool reports missing configuration, tell the user to run `/setup-telegram-token`. The setup command writes global config to `~/.pi/agent/pi-telegram/.env` so all Pi sessions can use it; project-local `.env` files can still override it.

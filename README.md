@@ -35,17 +35,23 @@ For local development in this repository, `.pi/settings.json` loads the package 
    ```
 
 4. Paste the BotFather token into the secure Pi input prompt. This keeps the token out of the LLM chat transcript.
-5. The command validates the token, saves it to `.env`, and asks you to send a message such as `hello world` to the bot.
-6. After you send the Telegram message, press Enter in Pi. The command fetches the chat id with Telegram `getUpdates`, saves it to `.env`, and sends a confirmation message to Telegram.
+5. The command validates the token, saves it to a global Pi Telegram config file, and asks you to send a message such as `hello world` to the bot.
+6. After you send the Telegram message, press Enter in Pi. The command fetches the chat id with Telegram `getUpdates`, saves it globally, and sends a confirmation message to Telegram.
 
-The generated `.env` uses:
+The generated global config lives at:
+
+```text
+~/.pi/agent/pi-telegram/.env
+```
+
+It uses:
 
 ```env
 PI_TELEGRAM_BOT_TOKEN=123456:your-bot-token
 PI_TELEGRAM_CHAT_ID=123456789
 ```
 
-The extension automatically reads `.env` from Pi's current working directory. Real environment variables also work, and the unprefixed names `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are supported.
+The extension automatically reads the global config from `~/.pi/agent/pi-telegram/.env`, so all Pi sessions can use the same Telegram setup. A project-local `.env` in Pi's current working directory can override the global config for that project. Real environment variables override both, and the unprefixed names `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are supported.
 
 ## Usage
 
@@ -128,8 +134,9 @@ Local audio files are uploaded with `multipart/form-data`. Telegram documents `s
 | `PI_TELEGRAM_BOT_TOKEN` / `TELEGRAM_BOT_TOKEN` | yes | Bot token from BotFather. |
 | `PI_TELEGRAM_CHAT_ID` / `TELEGRAM_CHAT_ID` | yes by default | Target chat id. Can be overridden per tool call with `chat_id`. |
 | `PI_TELEGRAM_API_BASE` / `TELEGRAM_API_BASE` | no | Defaults to `https://api.telegram.org`. |
+| `PI_TELEGRAM_CONFIG_DIR` | no | Directory for the global Telegram `.env`. Defaults to `~/.pi/agent/pi-telegram`. |
 
-Configuration can come from real environment variables or from a gitignored `.env` file in Pi's current working directory.
+Configuration precedence is: real environment variables, then project-local `.env`, then global `~/.pi/agent/pi-telegram/.env`.
 
 ## npm
 
