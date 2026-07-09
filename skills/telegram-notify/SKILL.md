@@ -6,12 +6,13 @@ license: MIT
 
 # Telegram Notify
 
-Use the Telegram tools when the user explicitly asks for a Telegram notification, update, report, image, or audio file.
+Use the Telegram tools when the user explicitly asks for a Telegram notification, update, report, image, audio file, or general file/document artifact.
 
 Available tools:
 
 - `telegram_send_message` — send text notifications/reports.
 - `telegram_send_image` — send image/photo files, screenshots, diagrams, or generated visuals.
+- `telegram_send_file` — send general files/documents such as APKs, Android app bundles, logs, reports, ZIPs, PDFs, and build artifacts.
 - `telegram_send_audio` — send audio files, recordings, or generated audio.
 
 ## Rules
@@ -24,7 +25,8 @@ Available tools:
   - validation performed
   - any remaining risks or next steps
 - Do not send secrets, API keys, bot tokens, credentials, private environment values, or unrelated private files.
-- Before sending a local image/audio file, make sure the path points to the intended file.
+- Before sending a local image/audio/general file, make sure the path points to the intended file.
+- Do not send secrets, API keys, signing keys, keystores, credential files, `.env` files, or unrelated private files via Telegram.
 - Use plain text by default. Only set `parse_mode` when the user specifically asks for HTML/Markdown formatting and the content is safe for that parse mode.
 
 ## Typical Flow
@@ -33,7 +35,7 @@ If the user says, "when you're done with the job send me a report via telegram":
 
 1. Do the job normally.
 2. Before your final chat response, call `telegram_send_message` with a concise final report.
-3. If the user requested a generated image/audio artifact, call `telegram_send_image` or `telegram_send_audio` with the artifact path and a short caption.
+3. If the user requested a generated image/audio/file artifact, call `telegram_send_image`, `telegram_send_audio`, or `telegram_send_file` with the artifact path and a short caption.
 4. In the final chat response, mention what was sent via Telegram.
 
 If `telegram_send_message` reports missing configuration, tell the user to configure `PI_TELEGRAM_BOT_TOKEN` and `PI_TELEGRAM_CHAT_ID` (or the unprefixed `TELEGRAM_*` variants) and to start a chat with the bot first.

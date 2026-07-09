@@ -9,6 +9,7 @@ const TELEGRAM_SAFE_CHUNK_LIMIT = 4000;
 const TELEGRAM_CAPTION_LIMIT = 1024;
 const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const TELEGRAM_AUDIO_MAX_BYTES = 50 * 1024 * 1024;
+const TELEGRAM_DOCUMENT_MAX_BYTES = 50 * 1024 * 1024;
 const MAX_REQUEST_TEXT_LENGTH = 20_000;
 const ALLOWED_PARSE_MODES = new Set(["MarkdownV2", "HTML", "Markdown"]);
 
@@ -37,6 +38,11 @@ type TelegramAudioParams = TelegramMediaParams & {
   duration?: number;
   performer?: string;
   title?: string;
+};
+
+type TelegramFileParams = TelegramMediaParams & {
+  filename?: string;
+  disable_content_type_detection?: boolean;
 };
 
 type TelegramChat = {
@@ -247,7 +253,7 @@ function resolveLocalSource(source: string, cwd: string): string | undefined {
   return resolved;
 }
 
-function mimeTypeForPath(path: string, kind: "photo" | "audio"): string {
+function mimeTypeForPath(path: string, kind: "photo" | "audio" | "document"): string {
   const lower = path.toLowerCase();
 
   if (kind === "photo") {
@@ -257,11 +263,21 @@ function mimeTypeForPath(path: string, kind: "photo" | "audio"): string {
     return "image/jpeg";
   }
 
-  if (lower.endsWith(".m4a")) return "audio/mp4";
-  if (lower.endsWith(".aac")) return "audio/aac";
-  if (lower.endsWith(".wav")) return "audio/wav";
-  if (lower.endsWith(".ogg")) return "audio/ogg";
-  return "audio/mpeg";
+  if (kind === "audio") {
+    if (lower.endsWith(".m4a")) return "audio/mp4";
+    if (lower.endsWith(".aac")) return "audio/aac";
+    if (lower.endsWith(".wav")) return "audio/wav";
+    if (lower.endsWith(".ogg")) return "audio/ogg";
+    return "audio/mpeg";
+  }
+
+  if (lower.endsWith(".apk")) return "application/vnd.android.package-archive";
+  if (lower.endsWith(".aab")) return "application/octet-stream";
+  if (lower.endsWith(".zip")) return "application/zip";
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".json")) return "application/json";
+  if (lower.endsWith(".txt") || lower.endsWith(".log")) return "text/plain";
+  return "application/octet-stream";
 }
 
 function buildJsonBody(fields: Record<string, string | number | boolean | undefined>): string {
@@ -274,7 +290,7 @@ function buildJsonBody(fields: Record<string, string | number | boolean | undefi
 
 function buildMultipartBody(
   fields: Record<string, string | number | boolean | undefined>,
-  media: { fieldName: string; filePath: string; kind: "photo" | "audio" },
+  media: { fieldName: string; filePath: string; kind: "photo" | "audio" | "document"; filename?: string },
 ): FormData {
   const form = new FormData();
 
@@ -284,7 +300,7 @@ function buildMultipartBody(
 
   const fileBytes = readFileSync(media.filePath);
   const blob = new Blob([fileBytes], { type: mimeTypeForPath(media.filePath, media.kind) });
-  form.append(media.fieldName, blob, basename(media.filePath));
+  form.append(media.fieldName, blob, media.filename?.trim() || basename(media.filePath));
 
   return form;
 }
@@ -376,9 +392,9 @@ function displayBotTarget(bot: TelegramUser): string {
 
 async function sendTelegramMedia(
   config: TelegramConfig,
-  method: "sendPhoto" | "sendAudio",
-  params: TelegramMediaParams | TelegramAudioParams,
-  options: { cwd: string; mediaField: "photo" | "audio"; maxBytes: number; signal?: AbortSignal },
+  method: "sendPhoto" | "sendAudio" | "sendDocument",
+  params: TelegramMediaParams | TelegramAudioParams | TelegramFileParams,
+  options: { cwd: string; mediaField: "photo" | "audio" | "document"; maxBytes: number; signal?: AbortSignal },
 ): Promise<TelegramApiResponse> {
   const { chatId, parseMode } = validateChatAndParseMode(params, config);
   const source = normalizeSource(params.source);
@@ -399,6 +415,10 @@ async function sendTelegramMedia(
     fields.title = audioParams.title;
   }
 
+  if (method === "sendDocument") {
+    fields.disable_content_type_detection = (params as TelegramFileParams).disable_content_type_detection;
+  }
+
   if (localPath) {
     const stats = statSync(localPath);
     if (stats.size > options.maxBytes) {
@@ -408,7 +428,12 @@ async function sendTelegramMedia(
     return callTelegramApi(
       config,
       method,
-      buildMultipartBody(fields, { fieldName: options.mediaField, filePath: localPath, kind: options.mediaField }),
+      buildMultipartBody(fields, {
+        fieldName: options.mediaField,
+        filePath: localPath,
+        kind: options.mediaField,
+        filename: (params as TelegramFileParams).filename,
+      }),
       options.signal,
     );
   }
@@ -528,6 +553,58 @@ const telegramSendImageTool = defineTool({
   },
 });
 
+const telegramSendFileTool = defineTool({
+  name: "telegram_send_file",
+  label: "Telegram File",
+  description:
+    "Send a one-way general file/document to the user's configured Telegram chat. Useful for APKs, app bundles, logs, reports, ZIPs, PDFs, and other build artifacts. Does not read Telegram replies.",
+  promptSnippet: "Send a general file/document to the configured Telegram chat.",
+  promptGuidelines: [
+    "Use telegram_send_file when the user asks Pi to send an APK, Android app bundle, log file, report, ZIP/PDF, or other build artifact via Telegram.",
+    "Before using telegram_send_file with a local file, make sure the file exists and is the intended artifact; do not send unrelated private files.",
+    "Do not send secrets, API keys, signing keys, keystores, credential files, or private environment files via Telegram.",
+    "Prefer local file paths for arbitrary files. Telegram only supports fetching some document types by HTTP URL.",
+    "Do not use telegram_send_file for two-way conversation; Telegram support is one-way from agent to user.",
+  ],
+  parameters: Type.Object({
+    source: Type.String({
+      description:
+        "Local file path relative to Pi's current working directory, absolute file path, HTTP(S) URL, or Telegram file_id. Local files are uploaded as documents.",
+      minLength: 1,
+    }),
+    caption: Type.Optional(Type.String({ description: "Optional file caption, max 1024 characters.", maxLength: TELEGRAM_CAPTION_LIMIT })),
+    filename: Type.Optional(Type.String({ description: "Optional display filename for local file uploads." })),
+    chat_id: Type.Optional(Type.String({ description: "Optional Telegram chat id or @channelusername. Defaults to configured chat id." })),
+    parse_mode: Type.Optional(Type.String({ description: "Optional caption parse mode: HTML, MarkdownV2, or Markdown. Omit for plain text." })),
+    disable_notification: Type.Optional(Type.Boolean({ description: "If true, Telegram sends the file silently." })),
+    disable_content_type_detection: Type.Optional(
+      Type.Boolean({ description: "If true, disables Telegram's server-side content type detection for uploaded files." }),
+    ),
+  }),
+
+  async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    const config = resolveConfig(ctx.cwd);
+    const payload = await sendTelegramMedia(config, "sendDocument", params, {
+      cwd: ctx.cwd,
+      mediaField: "document",
+      maxBytes: TELEGRAM_DOCUMENT_MAX_BYTES,
+      signal,
+    });
+
+    return {
+      content: [{ type: "text", text: `Sent Telegram file to ${payload.result?.chat?.id ?? params.chat_id ?? "configured chat"}.` }],
+      details: {
+        chatId: payload.result?.chat?.id ?? params.chat_id,
+        messageId: payload.result?.message_id,
+        source: params.source,
+        caption: params.caption,
+        filename: params.filename,
+        disableContentTypeDetection: Boolean(params.disable_content_type_detection),
+      },
+    };
+  },
+});
+
 const telegramSendAudioTool = defineTool({
   name: "telegram_send_audio",
   label: "Telegram Audio",
@@ -580,6 +657,7 @@ const telegramSendAudioTool = defineTool({
 export default function piTelegramExtension(pi: ExtensionAPI) {
   pi.registerTool(telegramSendMessageTool);
   pi.registerTool(telegramSendImageTool);
+  pi.registerTool(telegramSendFileTool);
   pi.registerTool(telegramSendAudioTool);
 
   pi.registerCommand("setup-telegram-token", {

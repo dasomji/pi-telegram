@@ -63,6 +63,10 @@ Send screenshots/final.png to me via Telegram with caption "Final screenshot".
 Send output/demo.m4a to Telegram as the demo audio.
 ```
 
+```text
+Build the Android debug APK and send it to me via Telegram.
+```
+
 ## Tools
 
 ### `telegram_send_message`
@@ -87,6 +91,20 @@ Parameters:
 - `chat_id`, `parse_mode`, `disable_notification` — same as text messages.
 
 Local image files are uploaded with `multipart/form-data`. Telegram's `sendPhoto` limit is 10 MB.
+
+### `telegram_send_file`
+
+Sends a general file/document using the Bot API `sendDocument` method. This is useful for Android APKs/AABs, logs, test reports, ZIPs, PDFs, and other build artifacts.
+
+Parameters:
+
+- `source` — local file path, absolute file path, HTTP(S) URL, or Telegram `file_id`.
+- `caption` — optional caption, max 1024 characters.
+- `filename` — optional display filename for local file uploads.
+- `disable_content_type_detection` — optional; disables Telegram's server-side content type detection for uploaded files.
+- `chat_id`, `parse_mode`, `disable_notification` — same as text messages.
+
+Local files are uploaded with `multipart/form-data`. Telegram's public Bot API currently allows documents up to 50 MB. Sending documents by HTTP URL is more limited; prefer local file paths for arbitrary artifacts.
 
 ### `telegram_send_audio`
 
