@@ -1,6 +1,6 @@
 {
   "name": "@wienerberliner/pi-telegram",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "One-way Telegram notifications for Pi agents via a BotFather bot.",
   "license": "MIT",
   "type": "module",

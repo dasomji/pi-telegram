@@ -2,7 +2,6 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 
 const DEFAULT_TELEGRAM_API_BASE = "https://api.telegram.org";
 const GLOBAL_CONFIG_DIR_ENV = "PI_TELEGRAM_CONFIG_DIR";
@@ -608,10 +607,7 @@ async function main(argv) {
   throw new Error(`Unknown command '${command}'. Run 'pi-telegram --help'.`);
 }
 
-const isEntrypoint = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
-if (isEntrypoint) {
-  main(process.argv.slice(2)).catch((error) => {
-    console.error(`pi-telegram: ${error.message}`);
-    process.exitCode = 1;
-  });
-}
+main(process.argv.slice(2)).catch((error) => {
+  console.error(`pi-telegram: ${error.message}`);
+  process.exitCode = 1;
+});
