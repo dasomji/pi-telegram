@@ -1,4 +1,6 @@
 node_modules/
+.pi/npm/
+.pi/git/
 .DS_Store
 *.log
 .env
