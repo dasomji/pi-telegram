@@ -6,12 +6,17 @@ Date: 2026-07-09
 
 Would `pi-telegram` be more effective as a Pi extension tool, a shell CLI, or both? The specific concern was token overhead: loading extension tools adds baseline prompt/tool-schema context, while a CLI avoids tool-schema bloat but may cost tokens when an agent has to discover command syntax.
 
-## Setup
+## Implementation
 
-Implemented a local CLI entrypoint:
+The package now ships both surfaces:
+
+- Pi extension tools: `telegram_send_message`, `telegram_send_image`, `telegram_send_audio`, and package support for file sends.
+- CLI binary: `pi-telegram`, published in `@wienerberliner/pi-telegram@0.1.7`.
+
+Example CLI send:
 
 ```bash
-node /home/dev/Development/pi-daniel/extensions/pi-telegram/bin/pi-telegram.mjs send-message --message "..." --silent --json
+pi-telegram send-message --message "Build finished" --json
 ```
 
 The CLI uses the same config precedence as the extension:
@@ -20,81 +25,108 @@ The CLI uses the same config precedence as the extension:
 2. Project-local `.env`.
 3. Global `~/.pi/agent/pi-telegram/.env`.
 
-Experiment run id: `77616a34`
+## Availability diagnosis
+
+The first comparison run was invalid.
+
+### Extension tool availability problem
+
+Run `77616a34` showed the tool-path child could read the `telegram-notify` skill docs, but could not call `telegram_send_message`. Root cause: global subagent overrides in `~/.pi/agent/settings.json` explicitly constrained builtin `delegate` / `worker` tool lists and did not include Telegram extension tools.
+
+Fix applied locally:
+
+- Added `telegram_send_message`, `telegram_send_image`, and `telegram_send_audio` to the `delegate` and `worker` subagent tool allowlists in `~/.pi/agent/settings.json`.
+- Confirmed with `subagent get delegate` that `telegram_send_message` appears in the child tool list.
+
+### CLI availability problem
+
+The npm `bin` existed under Pi's private install, but `pi-telegram` was not on the shell `PATH`. A local symlink was added:
+
+```text
+~/.local/bin/pi-telegram -> ~/.pi/agent/npm/node_modules/.bin/pi-telegram
+```
+
+That exposed a real CLI bug: running through a symlink produced no output because the entrypoint check only worked when invoking the real file path directly. Fixed in `0.1.7` by running the CLI main function unconditionally in the bin entrypoint.
+
+Validation after fix:
+
+```bash
+pi-telegram --help
+pi-telegram send-message --message 'PATH CLI dry run after 0.1.7' --dry-run --json
+```
+
+Both passed.
+
+## Invalid first run: `77616a34`
 
 Artifacts:
 
 - Tool-path report: `.pi-subagents/artifacts/outputs/77616a34/experiment/tool-agent.md`
 - CLI-path report: `.pi-subagents/artifacts/outputs/77616a34/experiment/cli-agent.md`
-- Tool transcript: `.pi-subagents/artifacts/77616a34_delegate_0_transcript.jsonl`
-- CLI transcript: `.pi-subagents/artifacts/77616a34_delegate_1_transcript.jsonl`
 
-## Results
+| Path | Outcome | Why |
+| --- | --- | --- |
+| Pi extension tool | Failed | `telegram_send_message` was not exposed to the fresh subagent runtime. |
+| CLI | Succeeded | The child was given the direct `node .../bin/pi-telegram.mjs` path. |
+
+Because only one side was actually available, this run should not be used as the comparison result.
+
+## Fair rerun: `c174a361`
+
+After fixing both availability issues, two fresh `delegate` subagents were launched with matched send tasks:
+
+- Tool child: must use `telegram_send_message`; must not use CLI/shell for Telegram.
+- CLI child: must use `pi-telegram`; must not use direct Telegram Pi tools.
+
+Artifacts:
+
+- Tool-path report: `.pi-subagents/artifacts/outputs/c174a361/experiment-rerun/tool-agent.md`
+- CLI-path report: `.pi-subagents/artifacts/outputs/c174a361/experiment-rerun/cli-agent.md`
+- Tool transcript: `.pi-subagents/artifacts/c174a361_delegate_0_transcript.jsonl`
+- CLI transcript: `.pi-subagents/artifacts/c174a361_delegate_1_transcript.jsonl`
 
 | Path | Outcome | Notes |
 | --- | --- | --- |
-| Pi extension tool in fresh subagent | Failed | The `telegram-notify` skill documented `telegram_send_message`, but the fresh subagent runtime did not expose that direct tool. MCP had 0 servers/tools; search/describe/connect attempts failed. The subagent obeyed constraints and did not fall back to CLI. |
-| CLI in fresh subagent | Succeeded | The subagent ran the provided command once. CLI returned JSON with `ok=true`, `chunks_sent=1`, one message id, and chat metadata. |
+| Pi extension tool | Succeeded | Used `telegram_send_message` directly. No friction or fallback. |
+| CLI | Succeeded | Used `pi-telegram --help`, then `pi-telegram send-message ... --json`. No fallback. |
 
-## Observed transcript / token metrics
+## Rerun token / transcript metrics
 
-These metrics are from subagent transcript `usage` records. They measure the child runs, not any parent-session extension tool schema bloat before launch.
+These metrics come from child transcript `usage` records. They measure the child runs, not the parent-session cost of having extension schemas loaded before launch.
 
 | Metric | Tool-path child | CLI-path child |
 | --- | ---: | ---: |
-| Transcript bytes | 65,742 | 38,273 |
-| Assistant messages | 9 | 4 |
-| Tool calls | 8 | 3 |
-| Tool results | 8 | 3 |
-| Supervisor replies | 1 | 0 |
-| Usage input tokens | 17,132 | 14,857 |
-| Usage output tokens | 3,013 | 1,765 |
-| Usage cache-read tokens | 104,448 | 36,864 |
-| Reported child cost | 0.228274 | 0.145667 |
+| Transcript bytes | 26,260 | 39,749 |
+| Assistant messages | 3 | 5 |
+| Tool calls | 2 | 4 |
+| Tool results | 2 | 4 |
+| Usage input tokens | 14,262 | 29,815 |
+| Usage output tokens | 1,122 | 1,409 |
+| Usage cache-read tokens | 26,112 | 39,936 |
+| Reported child cost | 0.118026 | 0.211313 |
 
-Interpretation: in this run, the CLI path was materially cheaper and more direct because the command was provided explicitly and the extension tool was not available inside the fresh delegate.
+## Interpretation
 
-## Effectiveness observations
+Once both paths were actually available, the direct Pi tool was cheaper and simpler for the child:
 
-### CLI strengths
+- Tool path: one semantic tool call plus artifact write.
+- CLI path: help/discovery call, shell send command, artifact write, and validation shell call.
 
-- Works in subagents that have ordinary shell access even when package extension tools are not exposed.
-- Can be used outside Pi and from scripts/CI.
-- Does not require loading Telegram tool schemas into every session.
-- JSON output gives agents a simple success contract.
-- Failure mode is familiar: shell command exits non-zero with stderr.
-
-### CLI weaknesses
-
-- If the prompt does not provide command syntax, the agent may spend tokens discovering `--help` or reading docs.
-- Shell quoting is easier to get wrong than typed tool parameters.
-- Secret setup via CLI needs care. The implementation now prefers `--bot-token-file` / `--bot-token-stdin`; raw `--bot-token` is supported but warned as unsafe.
-- Less semantic guidance than Pi tool descriptions unless the prompt or docs are explicit.
-
-### Extension strengths
-
-- Best UX in the parent Pi session: the user can ask naturally and the tool schema communicates parameter names/types.
-- Safer typed arguments and tool-specific guardrails.
-- Good for one-way Telegram reports in normal Pi workflows once the extension is loaded.
-
-### Extension weaknesses found
-
-- Fresh subagents using the builtin `delegate` tool set did not receive `telegram_send_message` even though the parent session/package has the extension installed.
-- The child could see the skill docs but not the actual tool, causing discovery churn and supervisor intervention.
-- Extension tools add baseline schema/prompt overhead in sessions where they are available.
+The CLI path may still win in sessions where Telegram tools are not loaded at all, because it avoids extension tool-schema baseline overhead. But inside a child runtime that already exposes the Telegram tool, the tool is more efficient and less error-prone.
 
 ## Recommendation
 
-Keep both.
+Keep both surfaces.
 
-- Keep the Pi extension for first-class parent-session UX and natural-language Telegram notifications.
-- Ship the CLI as the portable, subagent-friendly, low-baseline-overhead path.
-- For subagent workflows, prefer instructing children to use the CLI unless/until Pi subagents can explicitly expose package extension tools to child runtimes.
-- Document the exact CLI command shape in prompts when token efficiency matters; that avoids discovery overhead.
+- Use the Pi extension for normal Pi UX and subagents that have the Telegram tool in their allowlist.
+- Use the CLI for portability, scripts, CI, and subagent contexts where extension tools are intentionally not loaded.
+- For fair subagent comparisons, first verify availability:
+  - `subagent get delegate` should list `telegram_send_message` for the tool path.
+  - `which pi-telegram && pi-telegram --help` should work for the CLI path.
 
 ## Follow-up ideas
 
-1. Investigate whether pi-subagents can opt specific extension tools into a child agent tool list.
-2. If possible, rerun a true tool-vs-CLI experiment where the tool child actually has `telegram_send_message` available.
-3. Add a tiny smoke test around CLI parsing/config helpers if the package grows a test harness.
-4. Consider extracting shared Telegram logic from `extensions/telegram.ts` and `bin/pi-telegram.mjs` to reduce duplication once the CLI stabilizes.
+1. Add a small documented setup step for making package CLIs available on PATH after `pi install` / `pi update`, if Pi does not do that automatically.
+2. Consider a Pi/subagents setting convention for opt-in extension tools in child agents so installed package tools do not silently disappear behind explicit allowlists.
+3. Add tests around CLI symlink invocation if the package gains an automated test harness.
+4. Eventually extract shared Telegram config/send logic from `extensions/telegram.ts` and `bin/pi-telegram.mjs` to reduce duplication.
