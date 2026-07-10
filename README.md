@@ -96,6 +96,8 @@ CLI commands read the same configuration as the Pi extension:
 
 Run `pi-telegram --help` for the full command list and options. The CLI also supports `--dry-run` for validation without sending.
 
+When installed from npm, the package tries to create a convenience symlink at `~/.local/bin/pi-telegram`. It will not overwrite an existing non-`pi-telegram` command at that path. If `~/.local/bin` is not on your shell `PATH`, either add it or call the installed CLI directly with `node ~/.pi/agent/npm/node_modules/@wienerberliner/pi-telegram/bin/pi-telegram.mjs ...`.
+
 ## Tools
 
 ### `telegram_send_message`
