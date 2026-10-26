@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -169,6 +169,9 @@ function writeDotEnvValues(path: string, updates: Record<string, string>): void 
     next.push(`${key}=${formatDotEnvValue(value)}`);
   }
 
+  // The creation mode does not restrict an existing file. Tighten it before
+  // writing credentials so a previously public config cannot expose new values.
+  if (existsSync(path)) chmodSync(path, 0o600);
   writeFileSync(path, `${next.join("\n").replace(/\n*$/, "")}\n`, { mode: 0o600 });
 }
 
