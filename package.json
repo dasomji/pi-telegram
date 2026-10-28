@@ -36,6 +36,7 @@
     "scripts"
   ],
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "postinstall": "node scripts/link-cli.mjs",
     "typecheck": "tsc --noEmit"
   },
